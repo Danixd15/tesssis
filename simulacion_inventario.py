@@ -14,44 +14,49 @@ class ParametrosInventario:
     cost_holding_month: float
     cost_stockout: float
 
-def obtener_parametros_producto(df_params: pd.DataFrame, producto_id: str) -> ParametrosInventario:
+def obtener_parametros_producto(df_params: pd.DataFrame, producto_id: str, demanda_promedio: float = 100.0) -> ParametrosInventario:
     """
     Busca el producto en el dataframe maestro de parámetros y extrae sus valores específicos.
+    Si q_fixed o initial_stock son 0 o faltan, aplica reglas heurísticas de salvaguarda.
     """
-    # 🔴 SOLUCIÓN PANTALLA BLANCA: Si la tabla está vacía (ej. modo sintético), devuelve valores por defecto y sale.
     if df_params is None or df_params.empty:
         return ParametrosInventario(
             initial_stock=0, lead_time_months=1, review_period_months=1,
-            ss_months=1, q_fixed=100, lot_size=1,
+            ss_months=1, q_fixed=int(demanda_promedio), lot_size=1,
             cost_order=100.0, cost_holding_month=1.0, cost_stockout=100.0
         )
 
-    # Estandarizar nombre de la columna principal por si viene con espacios
     df_params = df_params.copy()
     columna_producto = "GRUPO DE DEMANDA" if "GRUPO DE DEMANDA" in df_params.columns else df_params.columns[0]
     
-    # Filtrar el dataframe por el producto seleccionado
     df_filtrado = df_params[df_params[columna_producto].astype(str).str.strip() == str(producto_id).strip()]
 
     if df_filtrado.empty:
-        # Valores por defecto si no se encuentra el producto específico en la tabla
         return ParametrosInventario(
             initial_stock=0, lead_time_months=1, review_period_months=1,
-            ss_months=1, q_fixed=100, lot_size=1,
+            ss_months=1, q_fixed=int(demanda_promedio), lot_size=1,
             cost_order=100.0, cost_holding_month=1.0, cost_stockout=100.0
         )
     
-    # Extraer la primera fila coincidente
     fila = df_filtrado.iloc[0]
 
-    # Mapear los valores
+    # Extraer Q fijo. Si en el Excel viene como 0, tomamos 1 mes de demanda promedio como salvaguarda
+    q_val = int(pd.to_numeric(fila.get("q_fixed", 0)))
+    if q_val <= 0:
+        q_val = max(1, int(demanda_promedio))
+
+    # Extraer SS meses. Si en el Excel viene en unidades (columna 'ss'), lo convertimos a meses aproximados
+    ss_m = int(pd.to_numeric(fila.get("ss_months", 0)))
+    if ss_m <= 0 and "ss" in fila and demanda_promedio > 0:
+        ss_m = max(1, int(round(float(fila.get("ss", 0)) / demanda_promedio)))
+
     return ParametrosInventario(
-        initial_stock=int(pd.to_numeric(fila.get("initial_stock", 0))),
+        initial_stock=int(pd.to_numeric(fila.get("initial_stock", fila.get("initial_stoc", 0)))),
         lead_time_months=int(math.ceil(pd.to_numeric(fila.get("lead_time_mo", fila.get("lead_time_months", 1))))),
         review_period_months=int(pd.to_numeric(fila.get("review_period", 1))),
-        ss_months=int(pd.to_numeric(fila.get("ss_months", 0))),
-        q_fixed=int(pd.to_numeric(fila.get("q_fixed", 100))),
-        lot_size=int(pd.to_numeric(fila.get("lot_size", 1))),
+        ss_months=ss_m,
+        q_fixed=q_val,
+        lot_size=max(1, int(pd.to_numeric(fila.get("lot_size", 1)))),
         cost_order=float(pd.to_numeric(fila.get("cost_order", 0.0))),
         cost_holding_month=float(pd.to_numeric(fila.get("cost_holding_month", fila.get("cost_holding_r", 0.0)))),
         cost_stockout=float(pd.to_numeric(fila.get("cost_stockout", 0.0)))
@@ -81,6 +86,7 @@ def simular_producto(df_producto: pd.DataFrame, politica: str, p: ParametrosInve
         )
         posicion_inventario = stock_fisico + sum(pipeline.values())
         orden = 0
+        
         if politica == "RS - revisión periódica":
             if t % p.review_period_months == 0:
                 orden = max(0, nivel_objetivo - posicion_inventario)
@@ -144,28 +150,20 @@ def calcular_kpis(df_sim: pd.DataFrame, p: ParametrosInventario) -> dict:
     }
 
 def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: ParametrosInventario, ss_max: int) -> pd.DataFrame:
-    """
-    Co-Optimización 2D: Evalúa combinaciones de Stock de Seguridad (SS) junto con
-    el tamaño de lote (Q) o el periodo de revisión (R) para encontrar la política global más barata.
-    """
     filas = []
     demanda_promedio = max(1.0, df_producto["demand_forecast"].mean())
     
-    # 1. Definir el espacio de búsqueda secundario según la política elegida
     if politica == "sQ - punto de reorden y cantidad fija":
-        # Probamos lotes Q que representen desde 0.5 hasta 6 meses de demanda, respetando el tamaño de empaque (lot_size)
         multiplos_q = [0.5, 1, 1.5, 2, 3, 4, 6]
         valores_q = [redondear_lote(demanda_promedio * m, p_base.lot_size) for m in multiplos_q]
         valores_q = sorted(list(set([q for q in valores_q if q > 0])))
         if not valores_q:
-            valores_q = [p_base.q_fixed]
-        valores_r = [p_base.review_period_months] # R se mantiene fijo
+            valores_q = [max(1, p_base.q_fixed)]
+        valores_r = [p_base.review_period_months]
     else:
-        # Para RS y sS, optimizamos cada cuántos meses revisar (R) y por ende el Nivel Máximo (S)
         valores_r = [1, 2, 3, 4, 6]
-        valores_q = [p_base.q_fixed] # Q se mantiene fijo
+        valores_q = [max(1, p_base.q_fixed)]
 
-    # 2. Búsqueda en Rejilla (Grid Search Bidimensional)
     for ss in range(0, ss_max + 1):
         mejor_escenario_ss = None
         menor_costo_ss = float('inf')
@@ -175,9 +173,9 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
                 p = ParametrosInventario(
                     initial_stock=p_base.initial_stock,
                     lead_time_months=p_base.lead_time_months,
-                    review_period_months=r_test, # Parámetro R co-optimizado
+                    review_period_months=r_test,
                     ss_months=ss,
-                    q_fixed=q_test,              # Parámetro Q co-optimizado
+                    q_fixed=q_test,
                     lot_size=p_base.lot_size,
                     cost_order=p_base.cost_order,
                     cost_holding_month=p_base.cost_holding_month,
@@ -198,3 +196,27 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
         filas.append(mejor_escenario_ss)
 
     return pd.DataFrame(filas)
+
+def evaluar_campeon_politicas(df_producto: pd.DataFrame, p_base: ParametrosInventario, ss_max: int) -> dict:
+    """
+    Torneo Global: Evalúa las 3 políticas en el horizonte proyectado para decir
+    cuál es la mejor política de seguridad y el Q óptimo absoluto para el SKU.
+    """
+    politicas = [
+        "RS - revisión periódica",
+        "sS - punto de reorden y nivel máximo",
+        "sQ - punto de reorden y cantidad fija"
+    ]
+    mejor_global = None
+    menor_costo_global = float('inf')
+
+    for pol in politicas:
+        df_opt = optimizar_stock_seguridad(df_producto, pol, p_base, ss_max)
+        mejor_pol = df_opt.loc[df_opt["total_cost"].idxmin()].to_dict()
+        mejor_pol["politica_ganadora"] = pol
+        
+        if mejor_pol["total_cost"] < menor_costo_global:
+            menor_costo_global = mejor_pol["total_cost"]
+            mejor_global = mejor_pol
+
+    return mejor_global
