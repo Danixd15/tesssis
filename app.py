@@ -1182,7 +1182,7 @@ sub_opt = optimizar_stock_seguridad(
     parametros_del_producto,
     ss_max=ss_max,
 )
-mejor = sub_opt.loc[sub_opt["total_cost"].idxmin()]
+mejor = sub_opt.sort_values(["stockout_cost", "total_cost"]).iloc[0]
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Método usado", metodo_usado)
@@ -1488,23 +1488,32 @@ with tab4:
 # TAB 5: OPTIMIZACIÓN FINANCIERA (CO-OPTIMIZACIÓN 2D)
 # =========================================================
 with tab5:
-    st.subheader("🎯 Optimización Financiera del Stock de Seguridad y Parámetros de Pedido")
+    st.subheader("🎯 Optimización Financiera enfocada en Minimizar Quiebres de Stock")
     st.write(
-        "Análisis de co-optimización (Grid Search 2D) para encontrar el equilibrio exacto entre "
-        "el Stock de Seguridad (SS) y los parámetros logísticos de reposición (Lote Q o Periodo R)."
+        "Análisis de co-optimización (Grid Search 2D) para encontrar la política y configuración "
+        "logística exacta que minimice las penalidades por quiebre de stock en el horizonte proyectado."
     )
     
     # -------------------------------------------------------------
-    # 1. TORNEO GLOBAL ENTRE LAS 3 POLÍTICAS (El aporte a tu Tesis)
+    # 1. TORNEO GLOBAL ENTRE LAS 3 POLÍTICAS (Criterio: Menor Quiebre)
     # -------------------------------------------------------------
     campeon = evaluar_campeon_politicas(sub_forecast, parametros_del_producto, ss_max)
     
+    if campeon['politica_ganadora'] == "sQ - punto de reorden y cantidad fija":
+        param_texto = f"Lote Fijo de Compra (Q) = **{campeon['q_optimo']:,.0f} unidades**"
+    else:
+        param_texto = f"Periodo de Revisión (R) = **{campeon['r_optimo']:.0f} meses**"
+
     st.info(
-        f"🏆 **ANÁLISIS DE POLÍTICA LOGÍSTICA ÓPTIMA (Proyección de 8 meses):**\n\n"
-        f"Al comparar las 3 políticas en el horizonte proyectado para **{producto_sel}**, el modelo determina que la estrategia campeona absoluta es aplicar "
-        f"**{campeon['politica_ganadora']}** con un Stock de Seguridad de **{int(campeon['ss_months'])} meses** y "
-        f"un Lote Fijo (Q) óptimo de **{campeon['q_optimo']:,.0f} unidades** (o Revisión cada {campeon['r_optimo']:.0f} meses).\n\n"
-        f"Alcanzando el costo mínimo global de **S/ {campeon['total_cost']:,.2f}** con un Fill Rate del **{campeon['fill_rate']:.2%}**."
+        f"🏆 **POLÍTICA LOGÍSTICA GANADORA (Seleccionada por Menor Costo de Quiebre):**\n\n"
+        f"Al evaluar todas las alternativas en la proyección para **{producto_sel}**, la mejor estrategia es "
+        f"**{campeon['politica_ganadora']}**.\n\n"
+        f"📌 **Parámetros óptimos recomendados:**\n"
+        f"- Stock de Seguridad (SS): **{int(campeon['ss_months'])} meses**\n"
+        f"- {param_texto}\n\n"
+        f"🚨 **Costo de Quiebre Mínimo Logrado: S/ {campeon['stockout_cost']:,.2f}** "
+        f"*(Ventas perdidas: {campeon['lost_sales_units']:,.0f} unds)*.\n\n"
+        f"💰 **Costo Total Operativo:** S/ {campeon['total_cost']:,.2f} | **Nivel de Servicio (Fill Rate):** {campeon['fill_rate']:.2%}"
     )
 
     # -------------------------------------------------------------
@@ -1519,10 +1528,9 @@ with tab5:
         param_extra_texto = f"un Periodo de Revisión (R) óptimo de **{r_opt_val:.0f} meses**"
 
     st.success(
-        f"**Recomendación para la Política Seleccionada (*{politica}*):** \n\n"
-        f"La configuración óptima es tener un Stock de Seguridad de **{int(mejor['ss_months'])} meses** combinada con {param_extra_texto}.\n\n"
-        f"Esta estrategia alcanza un Costo Total de **S/ {mejor['total_cost']:,.2f}** "
-        f"con un Nivel de Servicio (Fill Rate) proyectado del **{mejor['fill_rate']:.2%}**."
+        f"**Detalle para la Política Seleccionada (*{politica}*):** \n\n"
+        f"La configuración que logra el menor quiebre es tener un Stock de Seguridad de **{int(mejor['ss_months'])} meses** combinada con {param_extra_texto}.\n\n"
+        f"🚨 **Costo de Quiebre:** S/ {mejor['stockout_cost']:,.2f} | 💰 **Costo Total:** S/ {mejor['total_cost']:,.2f} | 📈 **Fill Rate:** {mejor['fill_rate']:.2%}"
     )
 
     # 3. GRÁFICO DE TRADE-OFF (Doble Eje)
