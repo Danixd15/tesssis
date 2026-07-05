@@ -12,12 +12,15 @@ from generar_pronosticos import (
     generar_forecast,
     generar_forecast_mejor_por_producto,
 )
+
 from simulacion_inventario import (
     simular_producto,
     calcular_kpis,
     optimizar_stock_seguridad,
     obtener_parametros_producto,
+    evaluar_campeon_politicas, # <--- ¡Agrega esta función a tus importaciones arriba!
 )
+
 from visualizacion import (
     grafico_forecast,
     grafico_inventario,
@@ -1482,7 +1485,7 @@ with tab4:
     st.info(f"**Costo Total de la Política Actual:** S/ {kpis['total_cost']:,.2f}")
 
 # =========================================================
-# TAB 5: OPTIMIZACIÓN (2D Co-Optimización)
+# TAB 5: OPTIMIZACIÓN FINANCIERA (CO-OPTIMIZACIÓN 2D)
 # =========================================================
 with tab5:
     st.subheader("🎯 Optimización Financiera del Stock de Seguridad y Parámetros de Pedido")
@@ -1491,6 +1494,22 @@ with tab5:
         "el Stock de Seguridad (SS) y los parámetros logísticos de reposición (Lote Q o Periodo R)."
     )
     
+    # -------------------------------------------------------------
+    # 1. TORNEO GLOBAL ENTRE LAS 3 POLÍTICAS (El aporte a tu Tesis)
+    # -------------------------------------------------------------
+    campeon = evaluar_campeon_politicas(sub_forecast, parametros_del_producto, ss_max)
+    
+    st.info(
+        f"🏆 **ANÁLISIS DE POLÍTICA LOGÍSTICA ÓPTIMA (Proyección de 8 meses):**\n\n"
+        f"Al comparar las 3 políticas en el horizonte proyectado para **{producto_sel}**, el modelo determina que la estrategia campeona absoluta es aplicar "
+        f"**{campeon['politica_ganadora']}** con un Stock de Seguridad de **{int(campeon['ss_months'])} meses** y "
+        f"un Lote Fijo (Q) óptimo de **{campeon['q_optimo']:,.0f} unidades** (o Revisión cada {campeon['r_optimo']:.0f} meses).\n\n"
+        f"Alcanzando el costo mínimo global de **S/ {campeon['total_cost']:,.2f}** con un Fill Rate del **{campeon['fill_rate']:.2%}**."
+    )
+
+    # -------------------------------------------------------------
+    # 2. DETALLE DE LA POLÍTICA SELECCIONADA EN EL MENÚ LATERAL
+    # -------------------------------------------------------------
     q_opt_val = mejor.get("q_optimo", parametros_del_producto.q_fixed)
     r_opt_val = mejor.get("r_optimo", parametros_del_producto.review_period_months)
 
@@ -1500,17 +1519,19 @@ with tab5:
         param_extra_texto = f"un Periodo de Revisión (R) óptimo de **{r_opt_val:.0f} meses**"
 
     st.success(
-        f"**Recomendación Logística Integral:** Para el producto {producto_sel} bajo la política *{politica}*, "
-        f"la configuración óptima es tener un Stock de Seguridad de **{int(mejor['ss_months'])} meses** combinada con {param_extra_texto}.\n\n"
-        f"Esta estrategia alcanza el Costo Total mínimo de **S/ {mejor['total_cost']:,.2f}** "
+        f"**Recomendación para la Política Seleccionada (*{politica}*):** \n\n"
+        f"La configuración óptima es tener un Stock de Seguridad de **{int(mejor['ss_months'])} meses** combinada con {param_extra_texto}.\n\n"
+        f"Esta estrategia alcanza un Costo Total de **S/ {mejor['total_cost']:,.2f}** "
         f"con un Nivel de Servicio (Fill Rate) proyectado del **{mejor['fill_rate']:.2%}**."
     )
 
+    # 3. GRÁFICO DE TRADE-OFF (Doble Eje)
     st.plotly_chart(grafico_tradeoff(sub_opt), use_container_width=True, key="chart_tradeoff_optimizacion")
 
     st.markdown("---")
     st.markdown("### 📋 Tabla de Sensibilidad de Escenarios Co-Optimizados")
     
+    # 4. TABLA DE SENSIBILIDAD
     df_sensibilidad = sub_opt.copy()
     
     if "q_optimo" not in df_sensibilidad.columns:
@@ -1545,7 +1566,7 @@ with tab5:
         use_container_width=True,
         hide_index=True
     )
-
+    
 # =========================================================
 # TAB 6: TABLAS Y REPORTES
 # =========================================================
