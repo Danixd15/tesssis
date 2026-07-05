@@ -17,7 +17,7 @@ class ParametrosInventario:
 def obtener_parametros_producto(df_params: pd.DataFrame, producto_id: str, demanda_promedio: float = 100.0) -> ParametrosInventario:
     """
     Busca el producto en el dataframe maestro de parámetros y extrae sus valores específicos.
-    Si q_fixed o initial_stock son 0 o faltan, aplica reglas heurísticas de salvaguarda.
+    Limpia los nombres de columnas de Excel (quita espacios y convierte a minúsculas) y detecta si el SS está en unidades.
     """
     if df_params is None or df_params.empty:
         return ParametrosInventario(
@@ -27,9 +27,11 @@ def obtener_parametros_producto(df_params: pd.DataFrame, producto_id: str, deman
         )
 
     df_params = df_params.copy()
-    columna_producto = "GRUPO DE DEMANDA" if "GRUPO DE DEMANDA" in df_params.columns else df_params.columns[0]
+    # Limpiamos los nombres de las columnas del Excel (quitamos espacios y pasamos a minúsculas)
+    df_params.columns = [str(c).strip().lower() for c in df_params.columns]
     
-    df_filtrado = df_params[df_params[columna_producto].astype(str).str.strip() == str(producto_id).strip()]
+    columna_producto = "grupo de demanda" if "grupo de demanda" in df_params.columns else df_params.columns[0]
+    df_filtrado = df_params[df_params[columna_producto].astype(str).str.strip().str.upper() == str(producto_id).strip().upper()]
 
     if df_filtrado.empty:
         return ParametrosInventario(
@@ -40,25 +42,27 @@ def obtener_parametros_producto(df_params: pd.DataFrame, producto_id: str, deman
     
     fila = df_filtrado.iloc[0]
 
-    # Extraer Q fijo. Si en el Excel viene como 0, tomamos 1 mes de demanda promedio como salvaguarda
+    # Extraer Q fijo. Si viene en 0, tomamos 1 mes de demanda promedio como salvaguarda
     q_val = int(pd.to_numeric(fila.get("q_fixed", 0)))
     if q_val <= 0:
         q_val = max(1, int(demanda_promedio))
 
-    # Extraer SS meses. Si en el Excel viene en unidades (columna 'ss'), lo convertimos a meses aproximados
-    ss_m = int(pd.to_numeric(fila.get("ss_months", 0)))
-    if ss_m <= 0 and "ss" in fila and demanda_promedio > 0:
-        ss_m = max(1, int(round(float(fila.get("ss", 0)) / demanda_promedio)))
+    # 🔴 LECTURA DE COLUMNA 'ss': Detecta automáticamente si está en UNIDADES (ej. 1,954,505) y lo pasa a MESES
+    ss_crudo = float(pd.to_numeric(fila.get("ss", fila.get("ss_months", 0))))
+    if ss_crudo > 36 and demanda_promedio > 0:
+        ss_m = max(1, int(round(ss_crudo / demanda_promedio)))
+    else:
+        ss_m = int(ss_crudo)
 
     return ParametrosInventario(
         initial_stock=int(pd.to_numeric(fila.get("initial_stock", fila.get("initial_stoc", 0)))),
-        lead_time_months=int(math.ceil(pd.to_numeric(fila.get("lead_time_mo", fila.get("lead_time_months", 1))))),
+        lead_time_months=int(math.ceil(pd.to_numeric(fila.get("lead_time_months", fila.get("lead_time_mo", 1))))),
         review_period_months=int(pd.to_numeric(fila.get("review_period", 1))),
         ss_months=ss_m,
         q_fixed=q_val,
         lot_size=max(1, int(pd.to_numeric(fila.get("lot_size", 1)))),
         cost_order=float(pd.to_numeric(fila.get("cost_order", 0.0))),
-        cost_holding_month=float(pd.to_numeric(fila.get("cost_holding_month", fila.get("cost_holding_r", 0.0)))),
+        cost_holding_month=float(pd.to_numeric(fila.get("cost_holding", fila.get("cost_holding_month", 0.0)))),
         cost_stockout=float(pd.to_numeric(fila.get("cost_stockout", 0.0)))
     )
     
