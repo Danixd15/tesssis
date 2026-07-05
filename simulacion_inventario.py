@@ -17,7 +17,6 @@ class ParametrosInventario:
 def obtener_parametros_producto(df_params: pd.DataFrame, producto_id: str, demanda_promedio: float = 100.0) -> ParametrosInventario:
     """
     Busca el producto en el dataframe maestro de parámetros y extrae sus valores específicos.
-    Limpia los nombres de columnas de Excel (quita espacios y convierte a minúsculas) y detecta si el SS está en unidades.
     """
     if df_params is None or df_params.empty:
         return ParametrosInventario(
@@ -27,7 +26,6 @@ def obtener_parametros_producto(df_params: pd.DataFrame, producto_id: str, deman
         )
 
     df_params = df_params.copy()
-    # Limpiamos los nombres de las columnas del Excel (quitamos espacios y pasamos a minúsculas)
     df_params.columns = [str(c).strip().lower() for c in df_params.columns]
     
     columna_producto = "grupo de demanda" if "grupo de demanda" in df_params.columns else df_params.columns[0]
@@ -42,23 +40,18 @@ def obtener_parametros_producto(df_params: pd.DataFrame, producto_id: str, deman
     
     fila = df_filtrado.iloc[0]
 
-    # Extraer Q fijo. Si viene en 0, tomamos 1 mes de demanda promedio como salvaguarda
     q_val = int(pd.to_numeric(fila.get("q_fixed", 0)))
     if q_val <= 0:
         q_val = max(1, int(demanda_promedio))
 
-    # 🔴 LECTURA DE COLUMNA 'ss': Detecta automáticamente si está en UNIDADES (ej. 1,954,505) y lo pasa a MESES
-    ss_crudo = float(pd.to_numeric(fila.get("ss", fila.get("ss_months", 0))))
-    if ss_crudo > 36 and demanda_promedio > 0:
-        ss_m = max(1, int(round(ss_crudo / demanda_promedio)))
-    else:
-        ss_m = int(ss_crudo)
+    # Extraer SS tal cual viene en el Excel (sea unidades o meses)
+    ss_val = int(pd.to_numeric(fila.get("ss", fila.get("ss_months", 0))))
 
     return ParametrosInventario(
         initial_stock=int(pd.to_numeric(fila.get("initial_stock", fila.get("initial_stoc", 0)))),
         lead_time_months=int(math.ceil(pd.to_numeric(fila.get("lead_time_months", fila.get("lead_time_mo", 1))))),
         review_period_months=int(pd.to_numeric(fila.get("review_period", 1))),
-        ss_months=ss_m,
+        ss_months=ss_val,
         q_fixed=q_val,
         lot_size=max(1, int(pd.to_numeric(fila.get("lot_size", 1)))),
         cost_order=float(pd.to_numeric(fila.get("cost_order", 0.0))),
@@ -83,11 +76,22 @@ def simular_producto(df_producto: pd.DataFrame, politica: str, p: ParametrosInve
         llegada = pipeline.pop(t, 0)
         stock_fisico += llegada
         demanda_durante_lead_time = demanda_promedio_mensual * p.lead_time_months
-        stock_seguridad = demanda_promedio_mensual * p.ss_months
+        
+        # 🔴 INTELIGENCIA LOGÍSTICA: Detectar si el SS está en UNIDADES directas o en MESES
+        if p.ss_months > 36:
+            # Si el número es grande (ej. 1,954,505), ya son UNIDADES exactas de tu Excel
+            stock_seguridad = float(p.ss_months)
+        else:
+            # Si el número es pequeño (ej. 1, 2, 3), son MESES y lo multiplicamos por la demanda
+            stock_seguridad = demanda_promedio_mensual * p.ss_months
+
         punto_reorden = demanda_durante_lead_time + stock_seguridad
-        nivel_objetivo = demanda_promedio_mensual * (
-            p.lead_time_months + p.review_period_months + p.ss_months
-        )
+        
+        if p.ss_months > 36:
+            nivel_objetivo = demanda_promedio_mensual * (p.lead_time_months + p.review_period_months) + float(p.ss_months)
+        else:
+            nivel_objetivo = demanda_promedio_mensual * (p.lead_time_months + p.review_period_months + p.ss_months)
+
         posicion_inventario = stock_fisico + sum(pipeline.values())
         orden = 0
         
@@ -168,6 +172,7 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
         valores_r = [1, 2, 3, 4, 6]
         valores_q = [max(1, p_base.q_fixed)]
 
+    # En optimización, ss siempre son MESES (0, 1, 2, 3...)
     for ss in range(0, ss_max + 1):
         mejor_escenario_ss = None
         menor_costo_ss = float('inf')
@@ -178,7 +183,7 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
                     initial_stock=p_base.initial_stock,
                     lead_time_months=p_base.lead_time_months,
                     review_period_months=r_test,
-                    ss_months=ss,
+                    ss_months=ss, # Aquí entra en MESES pequeños (0 a 6), por lo que simular_producto lo multiplicará bien
                     q_fixed=q_test,
                     lot_size=p_base.lot_size,
                     cost_order=p_base.cost_order,
@@ -202,10 +207,6 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
     return pd.DataFrame(filas)
 
 def evaluar_campeon_politicas(df_producto: pd.DataFrame, p_base: ParametrosInventario, ss_max: int) -> dict:
-    """
-    Torneo Global: Evalúa las 3 políticas en el horizonte proyectado para decir
-    cuál es la mejor política de seguridad y el Q óptimo absoluto para el SKU.
-    """
     politicas = [
         "RS - revisión periódica",
         "sS - punto de reorden y nivel máximo",
