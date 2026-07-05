@@ -1182,6 +1182,20 @@ mejor = sub_opt.sort_values(["stockout_cost", "total_cost"]).iloc[0]
 # 🏆 EJECUTAMOS EL TORNEO GLOBAL PARA LA CABECERA PRINCIPAL
 campeon = evaluar_campeon_politicas(sub_forecast, parametros_del_producto, ss_max)
 
+# -----------------------------------------------------------------
+# 🔴 CÁLCULO DE UNIDADES FÍSICAS (De Meses a Unidades Reales)
+# -----------------------------------------------------------------
+demanda_prom_sku = max(1.0, sub_forecast["demand_forecast"].mean())
+
+# Convertir SS del Campeón a unidades físicas
+ss_unds_camp = float(campeon['ss_months']) if campeon['ss_months'] > 36 else demanda_prom_sku * campeon['ss_months']
+# Convertir SS de la política actual a unidades físicas
+ss_unds_sel = float(mejor['ss_months']) if mejor['ss_months'] > 36 else demanda_prom_sku * mejor['ss_months']
+
+# Extraer Nivel Objetivo Techo (S) y Punto de Reorden (s) en unidades desde la simulación
+s_reorden_unds = sub_sim["reorder_point_s"].mean() if not sub_sim.empty else 0
+S_objetivo_unds = sub_sim["target_level_S"].mean() if not sub_sim.empty else 0
+
 # Formatear el parámetro secundario de la política ganadora
 if campeon["politica_ganadora"] == "sQ - punto de reorden y cantidad fija":
     nombre_pol = "sQ (Lote Fijo)"
@@ -1206,9 +1220,9 @@ col2.metric(
     help=f"Ganadora global: {campeon['politica_ganadora']}"
 )
 col3.metric(
-    label="⚙️ Configuración Óptima", 
+    label="⚙️ Stock Seguridad Óptimo", 
     value=f"SS: {int(campeon['ss_months'])} meses",
-    delta=detalle_param,
+    delta=f"{ss_unds_camp:,.0f} unidades físicas",
     delta_color="off"
 )
 col4.metric(
@@ -1233,6 +1247,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🎯 Optimización",
     "📋 Tablas",
 ])
+
 
 # =========================================================
 # TAB 1: MEJOR MÉTODO
@@ -1391,29 +1406,52 @@ with tab2:
 with tab3:
     st.subheader("💰 Evaluación Económica Integral del SKU")
     st.write(
-        "Análisis financiero conjunto: parámetros óptimos de reposición de inventario, "
+        "Análisis financiero conjunto: parámetros óptimos de reposición de inventario en unidades reales, "
         "riesgo financiero por quiebre de stock y ahorro en precisión de pronóstico."
     )
 
     # -----------------------------------------------------------------
-    # 1. POLÍTICA DE REPOSICIÓN Y COSTO DE QUIEBRE (Lo solicitado)
+    # 1. POLÍTICA DE REPOSICIÓN EN UNIDADES FÍSICAS (Lo solicitado)
     # -----------------------------------------------------------------
     st.markdown("### 📦 Configuración Logística Óptima y Riesgo de Quiebre")
     
     q_opt_val = mejor.get("q_optimo", parametros_del_producto.q_fixed)
     r_opt_val = mejor.get("r_optimo", parametros_del_producto.review_period_months)
-    
-    if politica == "sQ - punto de reorden y cantidad fija":
-        etiqueta_param = "Lote de Compra (Q)"
-        valor_param = f"{q_opt_val:,.0f} unds"
-    else:
-        etiqueta_param = "Periodo de Revisión (R)"
-        valor_param = f"{r_opt_val:.0f} meses"
 
     col_inv1, col_inv2, col_inv3, col_inv4 = st.columns(4)
     col_inv1.metric("Método de Revisión", politica.split(" - ")[0])
-    col_inv2.metric("Stock Seguridad (SS)", f"{int(mejor['ss_months'])} meses")
-    col_inv3.metric(etiqueta_param, valor_param)
+    
+    col_inv2.metric(
+        "Stock Seguridad (SS)", 
+        f"{int(mejor['ss_months'])} meses",
+        f"{ss_unds_sel:,.0f} unidades físicas",
+        delta_color="off"
+    )
+
+    # Mostrar el Techo Objetivo S o el Lote Q según la política
+    if politica == "RS - revisión periódica":
+        col_inv3.metric(
+            "Techo Objetivo (S) a Pedir", 
+            f"{S_objetivo_unds:,.0f} unds",
+            f"Revisar almacén cada {r_opt_val:.0f} mes(es)",
+            delta_color="off",
+            help="Es el inventario ideal al que debes rellenar físicamente el almacén el día de revisión."
+        )
+    elif politica == "sQ - punto de reorden y cantidad fija":
+        col_inv3.metric(
+            "Lote Fijo (Q) y Punto (s)", 
+            f"Q: {q_opt_val:,.0f} unds",
+            f"Pedir al caer a s = {s_reorden_unds:,.0f} unds",
+            delta_color="off"
+        )
+    else: # sS
+        col_inv3.metric(
+            "Punto Mín (s) y Techo (S)", 
+            f"S: {S_objetivo_unds:,.0f} unds",
+            f"Pedir al caer a s = {s_reorden_unds:,.0f} unds",
+            delta_color="off"
+        )
+
     col_inv4.metric(
         "🚨 Costo de Quiebre Proyectado", 
         f"S/ {mejor['stockout_cost']:,.2f}",
@@ -1477,6 +1515,7 @@ with tab3:
             use_container_width=True,
             hide_index=True,
         )
+
         
 # =========================================================
 # TAB 4: SIMULACIÓN (Recuperada)
