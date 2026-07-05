@@ -2,6 +2,7 @@ import warnings
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import io
 
 # =========================================================
 # IMPORTACIÓN DE MÓDULOS LOCALES
@@ -18,7 +19,7 @@ from simulacion_inventario import (
     calcular_kpis,
     optimizar_stock_seguridad,
     obtener_parametros_producto,
-    evaluar_campeon_politicas, # <--- ¡Agrega esta función a tus importaciones arriba!
+    evaluar_campeon_politicas,
 )
 
 from visualizacion import (
@@ -321,8 +322,7 @@ def preparar_comparacion_economica_sku(
     if (
         df_forecast_auto is None
         or df_forecast_auto.empty
-        or df_forecast_empresa is None
-        or df_forecast_empresa.empty
+        or df_forecast_auto.empty
     ):
         return pd.DataFrame()
 
@@ -509,7 +509,7 @@ def leer_tvu_desde_excel(xls: pd.ExcelFile) -> pd.DataFrame:
     return pd.read_excel(xls, sheet_name="TVU")
 
 
-def clasificar_riesgo_tvu(tvu):
+def clasificas_riesgo_tvu(tvu):
     """
     Clasificación por TVU.
     Se usa < 5 para que valores decimales como 4.5 no queden sin clasificar.
@@ -565,7 +565,7 @@ def preparar_tvu_lotes(df_tvu_raw: pd.DataFrame) -> pd.DataFrame:
     df["costo_unitario"] = pd.to_numeric(df["costo_unitario"], errors="coerce").fillna(0)
 
     df["valor_en_riesgo"] = df["stock"] * df["costo_unitario"]
-    df["riesgo_tvu"] = df["tvu"].apply(clasificar_riesgo_tvu)
+    df["riesgo_tvu"] = df["tvu"].apply(clasificas_riesgo_tvu)
 
     orden = {
         "🔴 Alto": 1,
@@ -785,8 +785,6 @@ def formatear_tvu_lotes(df_tvu: pd.DataFrame) -> pd.DataFrame:
 # =========================================================
 # FUNCIÓN AUXILIAR - GENERAR EXCEL CONSOLIDADO DE KPIS
 # =========================================================
-import io
-
 def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parametros: pd.DataFrame, ss_max: int) -> bytes:
     """
     Recorre todos los SKUs, calcula sus indicadores campeones y genera un
@@ -835,7 +833,7 @@ def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parame
         df_consolidado.to_excel(writer, index=False, sheet_name="Consolidado KPIs")
         
     return output.getvalue()
-    
+
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -967,6 +965,72 @@ total_lotes_tvu = len(df_tvu)
 total_skus_tvu = df_tvu["producto"].nunique() if not df_tvu.empty else 0
 
 # =========================================================
+# PRONÓSTICO MENSUAL (SE SACA DE LOS MÓDULOS)
+# =========================================================
+st.sidebar.header("2. Pronóstico mensual")
+
+modo_pronostico = st.sidebar.selectbox(
+    "Selección del método",
+    ["Automático: mejor método por producto", "Manual: elegir un método"],
+)
+
+ultima_fecha_historica = pd.to_datetime(df_real["date"].max()).to_period("M").to_timestamp()
+
+# Calculamos 8 meses futuros automáticamente
+fecha_8_meses = ultima_fecha_historica + pd.DateOffset(months=8)
+
+fecha_fin_pronostico = st.sidebar.date_input(
+    "Pronosticar hasta",
+    value=fecha_8_meses,
+    min_value=ultima_fecha_historica.date(),
+    key="fecha_fin_pronostico_global"
+)
+
+fecha_fin_pronostico = pd.to_datetime(fecha_fin_pronostico).to_period("M").to_timestamp()
+
+# Cálculo del forecast auto
+df_forecast_auto, df_comparacion = generar_forecast_mejor_por_producto(
+    df_real,
+    fecha_fin_pronostico=fecha_fin_pronostico,
+)
+
+# =========================================================
+# RESUMEN FORECAST PARA VISTA GENERAL
+# =========================================================
+total_skus_forecast = df_real["product_id"].nunique()
+
+df_ahorro_forecast, kpis_forecast = calcular_ahorro_forecast_2025(
+    df_forecast_auto=df_forecast_auto,
+    df_forecast_empresa=df_forecast_empresa,
+    df_parametros=df_parametros,
+)
+
+ahorro_total = kpis_forecast["ahorro_total"]
+skus_comparados_forecast = kpis_forecast["skus_comparados"]
+
+resumen_mejores_exec = df_comparacion[df_comparacion["Es mejor"]].copy()
+modelo_mas_usado = (
+    resumen_mejores_exec["Método"].mode().iloc[0]
+    if not resumen_mejores_exec.empty
+    else "Sin datos"
+)
+
+# =========================================================
+# POLÍTICA DE INVENTARIO Y SS_MAX GLOBAL
+# =========================================================
+st.sidebar.header("3. Política de Inventario")
+
+politica = st.sidebar.selectbox(
+    "Política (Modo Simulación)",
+    [
+        "RS - revisión periódica",
+        "sS - punto de reorden y nivel máximo",
+    ],
+)
+
+ss_max = st.sidebar.slider("Máximo SS para optimizar (meses)", 1, 24, 6)
+
+# =========================================================
 # MÓDULO TVU INDEPENDIENTE
 # =========================================================
 if modulo == "⚠️ TVU - Productos próximos a vencer":
@@ -1053,60 +1117,6 @@ if modulo == "⚠️ TVU - Productos próximos a vencer":
     st.stop()
 
 # =========================================================
-# PRONÓSTICO MENSUAL
-# =========================================================
-st.sidebar.header("2. Pronóstico mensual")
-
-modo_pronostico = st.sidebar.selectbox(
-    "Selección del método",
-    ["Automático: mejor método por producto", "Manual: elegir un método"],
-)
-
-ultima_fecha_historica = pd.to_datetime(df_real["date"].max()).to_period("M").to_timestamp()
-
-# Calculamos 8 meses futuros automáticamente
-fecha_8_meses = ultima_fecha_historica + pd.DateOffset(months=8)
-
-fecha_fin_pronostico = st.sidebar.date_input(
-    "Pronosticar hasta",
-    value=fecha_8_meses,
-    min_value=ultima_fecha_historica.date(),
-)
-
-fecha_fin_pronostico = pd.to_datetime(fecha_fin_pronostico).to_period("M").to_timestamp()
-
-# 🔴 ESTA ES LA LÍNEA QUE SE HABÍA BORRADO Y QUE CALCULA TODO:
-df_forecast_auto, df_comparacion = generar_forecast_mejor_por_producto(
-    df_real,
-    fecha_fin_pronostico=fecha_fin_pronostico,
-)
-
-# =========================================================
-# RESUMEN FORECAST PARA VISTA GENERAL
-# =========================================================
-
-# =========================================================
-# RESUMEN FORECAST PARA VISTA GENERAL
-# =========================================================
-total_skus_forecast = df_real["product_id"].nunique()
-
-df_ahorro_forecast, kpis_forecast = calcular_ahorro_forecast_2025(
-    df_forecast_auto=df_forecast_auto,
-    df_forecast_empresa=df_forecast_empresa,
-    df_parametros=df_parametros,
-)
-
-ahorro_total = kpis_forecast["ahorro_total"]
-skus_comparados_forecast = kpis_forecast["skus_comparados"]
-
-resumen_mejores_exec = df_comparacion[df_comparacion["Es mejor"]].copy()
-modelo_mas_usado = (
-    resumen_mejores_exec["Método"].mode().iloc[0]
-    if not resumen_mejores_exec.empty
-    else "Sin datos"
-)
-
-# =========================================================
 # MÓDULO VISTA GENERAL EJECUTIVA
 # =========================================================
 if modulo == "📊 Vista General Ejecutiva":
@@ -1126,13 +1136,10 @@ if modulo == "📊 Vista General Ejecutiva":
 
     st.divider()
 
-    # =========================================================
-    # BOTÓN DE DESCARGA CONSOLIDADA (VISTA GENERAL EJECUTIVA)
-    # =========================================================
+    # Botón de descarga consolidado
     st.markdown("### 📥 Reporte de Decisiones del Portafolio")
     st.write("Genera y descarga un consolidado en formato Excel con las políticas logísticas, inventarios óptimos y costos para todos los SKUs.")
 
-    # Usamos un contenedor de carga para informar al usuario mientras procesa todos los SKUs
     with st.spinner("Procesando optimización y compilando reporte para todos los SKUs..."):
         try:
             excel_binario = generar_excel_consolidado_kpis(
@@ -1146,7 +1153,8 @@ if modulo == "📊 Vista General Ejecutiva":
                 data=excel_binario,
                 file_name="reporte_consolidado_inventarios.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                use_container_width=True,
+                key="btn_descarga_excel_exec"
             )
         except Exception as e:
             st.error(f"No se pudo generar el reporte consolidado: {str(e)}")
@@ -1229,21 +1237,6 @@ if modo_pronostico == "Automático: mejor método por producto":
     st.sidebar.success(f"Método elegido para {producto_sel}: {mejor_metodo_producto}")
 else:
     st.sidebar.info(f"Mejor método para {producto_sel}: {mejor_metodo_producto}")
-
-# =========================================================
-# POLÍTICA DE INVENTARIO
-# =========================================================
-st.sidebar.header("3. Política de Inventario")
-
-politica = st.sidebar.selectbox(
-    "Política (Modo Simulación)",
-    [
-        "RS - revisión periódica",
-        "sS - punto de reorden y nivel máximo",
-    ],
-)
-
-ss_max = st.sidebar.slider("Máximo SS para optimizar (meses)", 1, 24, 6)
 
 parametros_del_producto = obtener_parametros_producto(df_parametros, producto_sel)
 
@@ -1436,6 +1429,7 @@ with tab1:
         data=resumen_mejores.to_csv(index=False).encode("utf-8"),
         file_name="mejor_metodo_por_producto.csv",
         mime="text/csv",
+        key="btn_descarga_csv_mejores"
     )
 
 # =========================================================
@@ -1725,7 +1719,33 @@ with tab5:
         use_container_width=True,
         hide_index=True
     )
-    
+
+    # =========================================================
+    # BOTÓN DE DESCARGA CONSOLIDADO TAMBIÉN EN MÓDULO DE INVENTARIOS
+    # =========================================================
+    st.divider()
+    st.markdown("### 📥 Reporte de Decisiones del Portafolio")
+    st.write("Genera y descarga un consolidado en formato Excel con las políticas logísticas, inventarios óptimos y costos para todos los SKUs.")
+
+    with st.spinner("Procesando optimización y compilando reporte para todos los SKUs..."):
+        try:
+            excel_binario_inv = generar_excel_consolidado_kpis(
+                df_forecast_completo=df_forecast_auto,
+                df_parametros=df_parametros,
+                ss_max=ss_max
+            )
+            
+            st.download_button(
+                label="📊 Descargar Consolidado de KPIs por SKU (Excel)",
+                data=excel_binario_inv,
+                file_name="reporte_consolidado_inventarios.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="btn_descarga_excel_inv"
+            )
+        except Exception as e:
+            st.error(f"No se pudo generar el reporte consolidado: {str(e)}")
+
 # =========================================================
 # TAB 6: TABLAS Y REPORTES
 # =========================================================
@@ -1847,6 +1867,7 @@ with tab6:
             file_name=f"pronostico_{producto_sel}.csv",
             mime="text/csv",
             use_container_width=True,
+            key="btn_descarga_csv_fore"
         )
     with col_d2:
         st.download_button(
@@ -1855,6 +1876,7 @@ with tab6:
             file_name=f"simulacion_{producto_sel}.csv",
             mime="text/csv",
             use_container_width=True,
+            key="btn_descarga_csv_sim"
         )
     with col_d3:
         st.download_button(
@@ -1863,6 +1885,7 @@ with tab6:
             file_name="comparacion_metodos_portafolio.csv",
             mime="text/csv",
             use_container_width=True,
+            key="btn_descarga_csv_comp"
         )
 
-
+--- END OF FILE Paste July 05, 2026 - 5:13PM ---
