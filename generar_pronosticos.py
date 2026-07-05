@@ -88,16 +88,12 @@ def forecast_ses(serie: np.ndarray, pasos_futuros: int = 0, alpha: float = None)
     try:
         modelo = SimpleExpSmoothing(serie, initialization_method="estimated")
         
-        # LÓGICA DE TESIS (Grid Search): Iterar entre 0 y 1 para encontrar el mejor Alfa
         if alpha is None:
-            mejor_alpha = 0.3  # Valor por defecto inicial
+            mejor_alpha = 0.3
             menor_error = float('inf')
-            
-            # Iteramos probando valores de alfa desde 0.01 hasta 0.99
             for a in np.arange(0.01, 1.00, 0.01):
                 try:
                     ajuste_temp = modelo.fit(smoothing_level=a, optimized=False)
-                    # Evaluamos qué tan bien se ajusta usando el Error Cuadrático Medio (MSE)
                     error_temp = mean_squared_error(serie, ajuste_temp.fittedvalues)
                     if error_temp < menor_error:
                         menor_error = error_temp
@@ -108,7 +104,6 @@ def forecast_ses(serie: np.ndarray, pasos_futuros: int = 0, alpha: float = None)
         else:
             alpha_optimo = alpha
 
-        # Ajustamos el modelo definitivo usando el alfa óptimo encontrado para este SKU
         ajuste = modelo.fit(smoothing_level=alpha_optimo, optimized=False)
         pred_hist = np.asarray(ajuste.fittedvalues)
         pred_future = np.asarray(ajuste.forecast(pasos_futuros)) if pasos_futuros > 0 else np.array([])
@@ -118,7 +113,6 @@ def forecast_ses(serie: np.ndarray, pasos_futuros: int = 0, alpha: float = None)
         return forecast_promedio_movil(serie, pasos_futuros)
 
 def forecast_arima(serie: np.ndarray, pasos_futuros: int = 0) -> tuple[np.ndarray, np.ndarray]:
-    # ESCUDO ANTI-CUELGUES: Si hay muchos ceros, ARIMA entra en bucle infinito. 
     if len(serie) < 6 or np.count_nonzero(serie) < (len(serie) * 0.4):
         return forecast_ses(serie, pasos_futuros)
     try:
@@ -131,7 +125,6 @@ def forecast_arima(serie: np.ndarray, pasos_futuros: int = 0) -> tuple[np.ndarra
         return forecast_ses(serie, pasos_futuros)
 
 def forecast_holt_winters(serie: np.ndarray, pasos_futuros: int = 0) -> tuple[np.ndarray, np.ndarray]:
-    # ESCUDO ANTI-CUELGUES: Holt-Winters se cuelga intentando buscar estacionalidad en puros ceros
     if len(serie) < 18 or np.count_nonzero(serie) < (len(serie) * 0.4):
         return forecast_ses(serie, pasos_futuros)
     try:
@@ -199,6 +192,8 @@ def calcular_errores(y_real, y_pred) -> dict:
 
 def calcular_meses_futuros(df: pd.DataFrame, fecha_fin) -> tuple[int, pd.Timestamp]:
     ultima_fecha = pd.to_datetime(df["date"].max()).to_period("M").to_timestamp()
+    if fecha_fin is None:
+        return 8, ultima_fecha + pd.DateOffset(months=8)
     fecha_fin = pd.to_datetime(fecha_fin).to_period("M").to_timestamp()
     if fecha_fin <= ultima_fecha:
         return 0, ultima_fecha
@@ -215,9 +210,13 @@ def generar_fechas_futuras(ultima_fecha, pasos_futuros: int) -> pd.DatetimeIndex
         freq="MS",
     )
 
-def generar_forecast(df: pd.DataFrame, metodo: str, fecha_fin_pronostico=None) -> pd.DataFrame:
+def generar_forecast(df: pd.DataFrame, metodo: str, fecha_fin_pronostico=None, pasos_futuros: int = 8) -> pd.DataFrame:
     resultados = []
-    pasos_futuros, _ = calcular_meses_futuros(df, fecha_fin_pronostico) if fecha_fin_pronostico is not None else (0, None)
+    if fecha_fin_pronostico is not None:
+        pasos_calc, _ = calcular_meses_futuros(df, fecha_fin_pronostico)
+        if pasos_calc > 0:
+            pasos_futuros = pasos_calc
+
     for producto, sub in df.groupby("product_id"):
         sub = sub.sort_values("date").copy()
         serie = sub["demand_real"].to_numpy(dtype=float)
@@ -246,10 +245,13 @@ def generar_forecast(df: pd.DataFrame, metodo: str, fecha_fin_pronostico=None) -
             resultados.append(futuro)
     return pd.concat(resultados, ignore_index=True)
 
-def generar_forecast_mejor_por_producto(df: pd.DataFrame, fecha_fin_pronostico=None):
+def generar_forecast_mejor_por_producto(df: pd.DataFrame, fecha_fin_pronostico=None, pasos_futuros: int = 8):
     forecasts_finales = []
     comparacion = []
-    pasos_futuros, _ = calcular_meses_futuros(df, fecha_fin_pronostico) if fecha_fin_pronostico is not None else (0, None)
+    if fecha_fin_pronostico is not None:
+        pasos_calc, _ = calcular_meses_futuros(df, fecha_fin_pronostico)
+        if pasos_calc > 0:
+            pasos_futuros = pasos_calc
 
     for producto, sub in df.groupby("product_id"):
         sub = sub.sort_values("date").copy()
