@@ -215,7 +215,6 @@ def evaluar_campeon_politicas(df_producto: pd.DataFrame, p_base: ParametrosInven
     politicas = [
         "RS - revisión periódica",
         "sS - punto de reorden y nivel máximo",
-        "sQ - punto de reorden y cantidad fija"
     ]
     mejor_global = None
 
