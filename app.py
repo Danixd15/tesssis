@@ -21,6 +21,7 @@ from simulacion_inventario import (
     optimizar_stock_seguridad,
     obtener_parametros_producto,
     evaluar_campeon_politicas,
+    ParametrosInventario  # <--- Importación de la clase de parámetros
 )
 
 from visualizacion import (
@@ -784,12 +785,12 @@ def formatear_tvu_lotes(df_tvu: pd.DataFrame) -> pd.DataFrame:
     ]
 
 # =========================================================
-# FUNCIÓN AUXILIAR - GENERAR EXCEL CONSOLIDADO DE KPIS (BLINDADO)
+# FUNCIÓN AUXILIAR - GENERAR EXCEL CONSOLIDADO DE KPIS (ANUALIZADO 2025 CON FILTRADO SEGURO)
 # =========================================================
 def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parametros: pd.DataFrame, ss_max: int) -> bytes:
     """
     Recorre todos los SKUs, calcula sus indicadores campeones y genera un
-    archivo Excel en memoria listo para descargar.
+    archivo Excel en memoria con los costos e indicadores estrictamente anualizados para el año 2025.
     Evita caídas por valores NaN utilizando un tipado y sanitizado defensivo.
     """
     productos = sorted(df_forecast_completo["product_id"].unique())
@@ -801,6 +802,44 @@ def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parame
         
         # Evaluar la política campeona global para este SKU
         campeon = evaluar_campeon_politicas(sub_fore, params, ss_max)
+        
+        # 1. Re-simular localmente con los parámetros óptimos para extraer la trayectoria temporal de 2025
+        p_optimo = ParametrosInventario(
+            initial_stock=params.initial_stock,
+            lead_time_months=params.lead_time_months,
+            review_period_months=int(campeon.get("r_optimo", params.review_period_months)),
+            ss_months=int(campeon.get("ss_months", params.ss_months)),
+            q_fixed=int(campeon.get("q_optimo", params.q_fixed)),
+            lot_size=params.lot_size,
+            cost_order=params.cost_order,
+            cost_holding_month=params.cost_holding_month,
+            cost_stockout=params.cost_stockout,
+        )
+        
+        df_sim_completo = simular_producto(sub_fore, campeon["politica_ganadora"], p_optimo)
+        
+        # 2. Filtrar el conjunto temporal estrictamente para el año de interés (2025)
+        df_sim_2025 = df_sim_completo[pd.to_datetime(df_sim_completo["date"]).dt.year == 2025].copy()
+        
+        # 3. Recalcular KPIs específicos solo con los datos de 2025
+        if not df_sim_2025.empty:
+            demanda_total_2025 = df_sim_2025["demand_real"].sum()
+            ventas_perdidas_2025 = df_sim_2025["sales_lost"].sum()
+            ordenes_2025 = (df_sim_2025["order_placed"] > 0).sum()
+            
+            fill_rate_2025 = 1 - (ventas_perdidas_2025 / demanda_total_2025) if demanda_total_2025 > 0 else 1.0
+            costo_ordenar_2025 = ordenes_2025 * params.cost_order
+            costo_mantener_2025 = df_sim_2025["inventory_level"].sum() * params.cost_holding_month
+            costo_quiebre_2025 = ventas_perdidas_2025 * params.cost_stockout
+            costo_total_2025 = costo_ordenar_2025 + costo_mantener_2025 + costo_quiebre_2025
+        else:
+            # Fallback en caso de que no existan registros para 2025
+            fill_rate_2025 = 1.0
+            ventas_perdidas_2025 = 0.0
+            costo_ordenar_2025 = 0.0
+            costo_mantener_2025 = 0.0
+            costo_quiebre_2025 = 0.0
+            costo_total_2025 = 0.0
         
         # Extraer métricas de pronóstico con validaciones de existencia y tipo
         metodo_usado = sub_fore["method_used"].iloc[0] if "method_used" in sub_fore.columns and not sub_fore["method_used"].empty else "Sin datos"
@@ -822,24 +861,13 @@ def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parame
         ss_unidades_clean = int(round(ss_unidades)) if pd.notnull(ss_unidades) and np.isfinite(ss_unidades) else 0
         ss_meses_final = int(ss_meses_clean)
         
-        # Sanitizar KPIs del simulador
-        fill_rate = campeon.get("fill_rate", 1.0)
-        fill_rate_clean = float(fill_rate) if pd.notnull(fill_rate) and np.isfinite(fill_rate) else 1.0
-        
-        lost_sales = campeon.get("lost_sales_units", 0.0)
-        lost_sales_clean = float(lost_sales) if pd.notnull(lost_sales) and np.isfinite(lost_sales) else 0.0
-        
-        c_order = campeon.get("ordering_cost", 0.0)
-        c_order_clean = float(c_order) if pd.notnull(c_order) and np.isfinite(c_order) else 0.0
-        
-        c_hold = campeon.get("holding_cost", 0.0)
-        c_hold_clean = float(c_hold) if pd.notnull(c_hold) and np.isfinite(c_hold) else 0.0
-        
-        c_stockout = campeon.get("stockout_cost", 0.0)
-        c_stockout_clean = float(c_stockout) if pd.notnull(c_stockout) and np.isfinite(c_stockout) else 0.0
-        
-        c_total = campeon.get("total_cost", 0.0)
-        c_total_clean = float(c_total) if pd.notnull(c_total) and np.isfinite(c_total) else 0.0
+        # Sanitizar KPIs anualizados de 2025
+        fill_rate_clean = float(fill_rate_2025) if pd.notnull(fill_rate_2025) and np.isfinite(fill_rate_2025) else 1.0
+        lost_sales_clean = float(ventas_perdidas_2025) if pd.notnull(ventas_perdidas_2025) and np.isfinite(ventas_perdidas_2025) else 0.0
+        c_order_clean = float(costo_ordenar_2025) if pd.notnull(costo_ordenar_2025) and np.isfinite(costo_ordenar_2025) else 0.0
+        c_hold_clean = float(costo_mantener_2025) if pd.notnull(costo_mantener_2025) and np.isfinite(costo_mantener_2025) else 0.0
+        c_stockout_clean = float(costo_quiebre_2025) if pd.notnull(costo_quiebre_2025) and np.isfinite(costo_quiebre_2025) else 0.0
+        c_total_clean = float(costo_total_2025) if pd.notnull(costo_total_2025) and np.isfinite(costo_total_2025) else 0.0
 
         registros.append({
             "SKU": prod,
@@ -849,19 +877,19 @@ def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parame
             "Política Recomendada": campeon.get("politica_ganadora", "RS - revisión periódica"),
             "SS Recomendado (Meses)": ss_meses_final,
             "SS Recomendado (Unidades)": ss_unidades_clean,
-            "Fill Rate Proyectado": fill_rate_clean,
-            "Ventas Perdidas (Unidades)": lost_sales_clean,
-            "Costo Ordenar (S/)": c_order_clean,
-            "Costo Almacenar (S/)": c_hold_clean,
-            "Costo Quiebre (S/)": c_stockout_clean,
-            "Costo Total Operativo (S/)": c_total_clean
+            "Fill Rate Proyectado (2025)": fill_rate_clean,
+            "Ventas Perdidas (Unidades - 2025)": lost_sales_clean,
+            "Costo Ordenar (S/ - 2025)": c_order_clean,
+            "Costo Almacenar (S/ - 2025)": c_hold_clean,
+            "Costo Quiebre (S/ - 2025)": c_stockout_clean,
+            "Costo Total Operativo (S/ - 2025)": c_total_clean
         })
         
     df_consolidado = pd.DataFrame(registros)
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_consolidado.to_excel(writer, index=False, sheet_name="Consolidado KPIs")
+        df_consolidado.to_excel(writer, index=False, sheet_name="KPIs 2025 Consolidado")
         
     return output.getvalue()
 
@@ -988,7 +1016,7 @@ else:
                         df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(0)
                     elif "lot_size" in col_norm:
                         df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(1)
-                    elif "cost" in col_norm or "holding" in col_norm or "stockout" in col_norm or "order" in col_norm or "value" in col_norm or "costo" in col_norm:
+                    elif "cost" in col_norm or "holding" in col_norm or "stockout" in col_norm or "order" in col_norm or "value" in col_norm or "costo" in col_norm or "unit" in col_norm:
                         df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(0.0)
         else:
             st.error(
@@ -1202,7 +1230,7 @@ if modulo == "📊 Vista General Ejecutiva":
             st.download_button(
                 label="📊 Descargar Consolidado de KPIs por SKU (Excel)",
                 data=excel_binario,
-                file_name="reporte_consolidado_inventarios.xlsx",
+                file_name="reporte_consolidado_inventarios_2025.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="btn_descarga_excel_exec"
