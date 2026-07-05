@@ -1169,27 +1169,60 @@ ss_max = st.sidebar.slider("Máximo SS para optimizar (meses)", 1, 24, 6)
 parametros_del_producto = obtener_parametros_producto(df_parametros, producto_sel)
 
 # =========================================================
-# CONTENIDO PRINCIPAL
+# CONTENIDO PRINCIPAL (PANEL GERENCIAL DE CAMPEONES)
 # =========================================================
 sub_forecast = df_forecast[df_forecast["product_id"] == producto_sel].copy()
 metodo_usado = sub_forecast["method_used"].iloc[0]
 
+# Ejecución de simulación estándar
 sub_sim = simular_producto(sub_forecast, politica, parametros_del_producto)
 kpis = calcular_kpis(sub_sim, parametros_del_producto)
-sub_opt = optimizar_stock_seguridad(
-    sub_forecast,
-    politica,
-    parametros_del_producto,
-    ss_max=ss_max,
-)
+sub_opt = optimizar_stock_seguridad(sub_forecast, politica, parametros_del_producto, ss_max=ss_max)
 mejor = sub_opt.sort_values(["stockout_cost", "total_cost"]).iloc[0]
 
+# 🏆 EJECUTAMOS EL TORNEO GLOBAL PARA LA CABECERA PRINCIPAL
+campeon = evaluar_campeon_politicas(sub_forecast, parametros_del_producto, ss_max)
+
+# Formatear el parámetro secundario de la política ganadora
+if campeon["politica_ganadora"] == "sQ - punto de reorden y cantidad fija":
+    nombre_pol = "sQ (Lote Fijo)"
+    detalle_param = f"Lote Q: {campeon['q_optimo']:,.0f} unds"
+elif campeon["politica_ganadora"] == "RS - revisión periódica":
+    nombre_pol = "RS (Rev. Periódica)"
+    detalle_param = f"Revisión R: {campeon['r_optimo']:.0f} meses"
+else:
+    nombre_pol = "sS (Min - Max)"
+    detalle_param = f"Revisión R: {campeon['r_optimo']:.0f} meses"
+
+# LAS 5 TARJETAS GERENCIALES
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Método usado", metodo_usado)
-col2.metric("Fill rate", f"{kpis['fill_rate']:.2%}")
-col3.metric("Inventario promedio", f"{kpis['avg_inventory']:.1f}")
-col4.metric("Ventas perdidas", f"{kpis['lost_sales_units']:.0f}")
-col5.metric("Costo total", f"S/ {kpis['total_cost']:,.2f}")
+
+col1.metric(
+    label="🏆 Mejor Pronóstico", 
+    value=metodo_usado
+)
+col2.metric(
+    label="📦 Mejor Política", 
+    value=nombre_pol,
+    help=f"Ganadora global: {campeon['politica_ganadora']}"
+)
+col3.metric(
+    label="⚙️ Configuración Óptima", 
+    value=f"SS: {int(campeon['ss_months'])} meses",
+    delta=detalle_param,
+    delta_color="off"
+)
+col4.metric(
+    label="🚨 Costo de Quiebre Mínimo", 
+    value=f"S/ {campeon['stockout_cost']:,.2f}",
+    help=f"Ventas perdidas reducidas a: {campeon['lost_sales_units']:,.0f} unidades"
+)
+col5.metric(
+    label="📈 Fill Rate Proyectado", 
+    value=f"{campeon['fill_rate']:.2%}",
+    delta=f"Costo Total: S/ {campeon['total_cost']:,.2f}",
+    delta_color="off"
+)
 
 st.divider()
 
