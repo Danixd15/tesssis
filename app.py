@@ -1008,18 +1008,16 @@ modo_pronostico = st.sidebar.selectbox(
 
 ultima_fecha_historica = pd.to_datetime(df_real["date"].max()).to_period("M").to_timestamp()
 
+# CALCULAMOS 8 MESES EXACTOS AUTOMÁTICAMENTE:
+fecha_8_meses = ultima_fecha_historica + pd.DateOffset(months=8)
+
 fecha_fin_pronostico = st.sidebar.date_input(
     "Pronosticar hasta",
-    value=pd.Timestamp("2026-12-01"),
+    value=fecha_8_meses,  # <--- Ahora siempre será tu última fecha + 8 meses
     min_value=ultima_fecha_historica.date(),
 )
 
 fecha_fin_pronostico = pd.to_datetime(fecha_fin_pronostico).to_period("M").to_timestamp()
-
-df_forecast_auto, df_comparacion = generar_forecast_mejor_por_producto(
-    df_real,
-    fecha_fin_pronostico=fecha_fin_pronostico,
-)
 
 # =========================================================
 # RESUMEN FORECAST PARA VISTA GENERAL
