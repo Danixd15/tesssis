@@ -1073,6 +1073,33 @@ if modulo == "📊 Vista General Ejecutiva":
 
     st.divider()
 
+    # =========================================================
+    # BOTÓN DE DESCARGA CONSOLIDADA (VISTA GENERAL EJECUTIVA)
+    # =========================================================
+    st.markdown("### 📥 Reporte de Decisiones del Portafolio")
+    st.write("Genera y descarga un consolidado en formato Excel con las políticas logísticas, inventarios óptimos y costos para todos los SKUs.")
+
+    # Usamos un contenedor de carga para informar al usuario mientras procesa todos los SKUs
+    with st.spinner("Procesando optimización y compilando reporte para todos los SKUs..."):
+        try:
+            excel_binario = generar_excel_consolidado_kpis(
+                df_forecast_completo=df_forecast_auto,
+                df_parametros=df_parametros,
+                ss_max=ss_max
+            )
+            
+            st.download_button(
+                label="📊 Descargar Consolidado de KPIs por SKU (Excel)",
+                data=excel_binario,
+                file_name="reporte_consolidado_inventarios.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        except Exception as e:
+            st.error(f"No se pudo generar el reporte consolidado: {str(e)}")
+
+    st.divider()
+
     col_a, col_b = st.columns(2)
 
     with col_a:
@@ -1785,32 +1812,6 @@ with tab6:
             use_container_width=True,
         )
 
-# =========================================================
-    # BOTÓN DE DESCARGA CONSOLIDADA (VISTA GENERAL EJECUTIVA)
-    # =========================================================
-    st.markdown("### 📥 Reporte de Decisiones del Portafolio")
-    st.write("Genera y descarga un consolidado en formato Excel con las políticas logísticas, inventarios óptimos y costos para todos los SKUs.")
-
-    # Usamos un contenedor de carga para informar al usuario mientras procesa todos los SKUs
-    with st.spinner("Procesando optimización y compilando reporte para todos los SKUs..."):
-        try:
-            excel_binario = generar_excel_consolidado_kpis(
-                df_forecast_completo=df_forecast_auto,
-                df_parametros=df_parametros,
-                ss_max=ss_max
-            )
-            
-            st.download_button(
-                label="📊 Descargar Consolidado de KPIs por SKU (Excel)",
-                data=excel_binario,
-                file_name="reporte_consolidado_inventarios.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-        except Exception as e:
-            st.error(f"No se pudo generar el reporte consolidado: {str(e)}")
-
-    st.divider()
 
 import io
 
