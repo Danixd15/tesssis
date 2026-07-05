@@ -1160,7 +1160,6 @@ politica = st.sidebar.selectbox(
     [
         "RS - revisión periódica",
         "sS - punto de reorden y nivel máximo",
-        "sQ - punto de reorden y cantidad fija",
     ],
 )
 
