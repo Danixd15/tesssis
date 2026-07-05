@@ -172,9 +172,9 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
         valores_r = [1, 2, 3, 4, 6]
         valores_q = [max(1, p_base.q_fixed)]
 
-    # En optimización, ss siempre son MESES (0, 1, 2, 3...)
     for ss in range(0, ss_max + 1):
         mejor_escenario_ss = None
+        menor_quiebre_ss = float('inf')
         menor_costo_ss = float('inf')
         
         for r_test in valores_r:
@@ -183,7 +183,7 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
                     initial_stock=p_base.initial_stock,
                     lead_time_months=p_base.lead_time_months,
                     review_period_months=r_test,
-                    ss_months=ss, # Aquí entra en MESES pequeños (0 a 6), por lo que simular_producto lo multiplicará bien
+                    ss_months=ss,
                     q_fixed=q_test,
                     lot_size=p_base.lot_size,
                     cost_order=p_base.cost_order,
@@ -193,7 +193,9 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
                 sim = simular_producto(df_producto, politica, p)
                 kpis = calcular_kpis(sim, p)
                 
-                if kpis["total_cost"] < menor_costo_ss:
+                # 🔴 NUEVO CRITERIO: Priorizar menor costo de quiebre. Si empatan en quiebre, gana el de menor costo total.
+                if (kpis["stockout_cost"] < menor_quiebre_ss) or (kpis["stockout_cost"] == menor_quiebre_ss and kpis["total_cost"] < menor_costo_ss):
+                    menor_quiebre_ss = kpis["stockout_cost"]
                     menor_costo_ss = kpis["total_cost"]
                     mejor_escenario_ss = {
                         "ss_months": ss, 
@@ -207,21 +209,26 @@ def optimizar_stock_seguridad(df_producto: pd.DataFrame, politica: str, p_base: 
     return pd.DataFrame(filas)
 
 def evaluar_campeon_politicas(df_producto: pd.DataFrame, p_base: ParametrosInventario, ss_max: int) -> dict:
+    """
+    Torneo Global: Evalúa las 3 políticas basándose estrictamente en cuál genera el MENOR COSTO DE QUIEBRE.
+    """
     politicas = [
         "RS - revisión periódica",
         "sS - punto de reorden y nivel máximo",
         "sQ - punto de reorden y cantidad fija"
     ]
     mejor_global = None
-    menor_costo_global = float('inf')
 
+    filas_torneo = []
     for pol in politicas:
         df_opt = optimizar_stock_seguridad(df_producto, pol, p_base, ss_max)
-        mejor_pol = df_opt.loc[df_opt["total_cost"].idxmin()].to_dict()
+        # Elegir el mejor escenario para esta política según menor costo de quiebre
+        mejor_pol = df_opt.sort_values(["stockout_cost", "total_cost"]).iloc[0].to_dict()
         mejor_pol["politica_ganadora"] = pol
-        
-        if mejor_pol["total_cost"] < menor_costo_global:
-            menor_costo_global = mejor_pol["total_cost"]
-            mejor_global = mejor_pol
+        filas_torneo.append(mejor_pol)
 
-    return mejor_global
+    df_torneo = pd.DataFrame(filas_torneo)
+    # Elegir la política campeona global por menor costo de quiebre
+    campeon = df_torneo.sort_values(["stockout_cost", "total_cost"]).iloc[0].to_dict()
+    
+    return campeon
