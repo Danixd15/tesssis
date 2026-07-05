@@ -782,7 +782,60 @@ def formatear_tvu_lotes(df_tvu: pd.DataFrame) -> pd.DataFrame:
         ]
     ]
 
+# =========================================================
+# FUNCIÓN AUXILIAR - GENERAR EXCEL CONSOLIDADO DE KPIS
+# =========================================================
+import io
 
+def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parametros: pd.DataFrame, ss_max: int) -> bytes:
+    """
+    Recorre todos los SKUs, calcula sus indicadores campeones y genera un
+    archivo Excel en memoria listo para descargar.
+    """
+    productos = sorted(df_forecast_completo["product_id"].unique())
+    registros = []
+
+    for prod in productos:
+        params = obtener_parametros_producto(df_parametros, prod)
+        sub_fore = df_forecast_completo[df_forecast_completo["product_id"] == prod].copy()
+        
+        # Evaluar la política campeona global para este SKU
+        campeon = evaluar_campeon_politicas(sub_fore, params, ss_max)
+        
+        # Extraer métricas del mejor pronóstico seleccionado
+        metodo_usado = sub_fore["method_used"].iloc[0]
+        wmape = sub_fore["method_wmape"].iloc[0]
+        bias = sub_fore["method_bias"].iloc[0]
+        
+        # Convertir SS a unidades físicas reales
+        demanda_prom_sku = max(1.0, sub_fore["demand_forecast"].mean())
+        ss_meses = campeon["ss_months"]
+        ss_unidades = float(ss_meses) if ss_meses > 36 else (demanda_prom_sku * ss_meses)
+        
+        registros.append({
+            "SKU": prod,
+            "Mejor Método Pronóstico": metodo_usado,
+            "wMAPE (Error)": wmape,
+            "Bias (Sesgo)": bias,
+            "Política Recomendada": campeon["politica_ganadora"],
+            "SS Recomendado (Meses)": ss_meses,
+            "SS Recomendado (Unidades)": round(ss_unidades),
+            "Fill Rate Proyectado": campeon["fill_rate"],
+            "Ventas Perdidas (Unidades)": campeon["lost_sales_units"],
+            "Costo Ordenar (S/)": campeon["ordering_cost"],
+            "Costo Almacenar (S/)": campeon["holding_cost"],
+            "Costo Quiebre (S/)": campeon["stockout_cost"],
+            "Costo Total Operativo (S/)": campeon["total_cost"]
+        })
+        
+    df_consolidado = pd.DataFrame(registros)
+    
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_consolidado.to_excel(writer, index=False, sheet_name="Consolidado KPIs")
+        
+    return output.getvalue()
+    
 # =========================================================
 # CONFIGURACIÓN GENERAL
 # =========================================================
@@ -1811,59 +1864,5 @@ with tab6:
             mime="text/csv",
             use_container_width=True,
         )
-
-
-import io
-
-def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parametros: pd.DataFrame, ss_max: int) -> bytes:
-    """
-    Recorre todos los SKUs, calcula sus indicadores campeones y genera un
-    archivo Excel en memoria listo para descargar.
-    """
-    productos = sorted(df_forecast_completo["product_id"].unique())
-    registros = []
-
-    for prod in productos:
-        # 1. Obtener parámetros y sub-forecast de este SKU específico
-        params = obtener_parametros_producto(df_parametros, prod)
-        sub_fore = df_forecast_completo[df_forecast_completo["product_id"] == prod].copy()
-        
-        # 2. Evaluar la política campeona global para este SKU
-        campeon = evaluar_campeon_politicas(sub_fore, params, ss_max)
-        
-        # 3. Extraer métricas del mejor pronóstico seleccionado
-        metodo_usado = sub_fore["method_used"].iloc[0]
-        wmape = sub_fore["method_wmape"].iloc[0]
-        bias = sub_fore["method_bias"].iloc[0]
-        
-        # 4. Convertir SS a unidades físicas reales
-        demanda_prom_sku = max(1.0, sub_fore["demand_forecast"].mean())
-        ss_meses = campeon["ss_months"]
-        ss_unidades = float(ss_meses) if ss_meses > 36 else (demanda_prom_sku * ss_meses)
-        
-        registros.append({
-            "SKU": prod,
-            "Mejor Método Pronóstico": metodo_usado,
-            "wMAPE (Error)": wmape,
-            "Bias (Sesgo)": bias,
-            "Política Recomendada": campeon["politica_ganadora"],
-            "SS Recomendado (Meses)": ss_meses,
-            "SS Recomendado (Unidades)": round(ss_unidades),
-            "Fill Rate Proyectado": campeon["fill_rate"],
-            "Ventas Perdidas (Unidades)": campeon["lost_sales_units"],
-            "Costo Ordenar (S/)": campeon["ordering_cost"],
-            "Costo Almacenar (S/)": campeon["holding_cost"],
-            "Costo Quiebre (S/)": campeon["stockout_cost"],
-            "Costo Total Operativo (S/)": campeon["total_cost"]
-        })
-        
-    df_consolidado = pd.DataFrame(registros)
-    
-    # Escribir el DataFrame a un objeto binario de Excel en memoria
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_consolidado.to_excel(writer, index=False, sheet_name="Consolidado KPIs")
-        
-    return output.getvalue()
 
 
