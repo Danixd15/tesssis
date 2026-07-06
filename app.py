@@ -1,9 +1,7 @@
 import warnings
 import pandas as pd
-import numpy as np
 import plotly.express as px
 import streamlit as st
-import io
 
 # =========================================================
 # IMPORTACIÓN DE MÓDULOS LOCALES
@@ -20,8 +18,7 @@ from simulacion_inventario import (
     calcular_kpis,
     optimizar_stock_seguridad,
     obtener_parametros_producto,
-    evaluar_campeon_politicas,
-    ParametrosInventario  # <--- Importación de la clase de parámetros
+    evaluar_campeon_politicas, # <--- ¡Agrega esta función a tus importaciones arriba!
 )
 
 from visualizacion import (
@@ -324,7 +321,8 @@ def preparar_comparacion_economica_sku(
     if (
         df_forecast_auto is None
         or df_forecast_auto.empty
-        or df_forecast_auto.empty
+        or df_forecast_empresa is None
+        or df_forecast_empresa.empty
     ):
         return pd.DataFrame()
 
@@ -511,7 +509,7 @@ def leer_tvu_desde_excel(xls: pd.ExcelFile) -> pd.DataFrame:
     return pd.read_excel(xls, sheet_name="TVU")
 
 
-def clasificas_riesgo_tvu(tvu):
+def clasificar_riesgo_tvu(tvu):
     """
     Clasificación por TVU.
     Se usa < 5 para que valores decimales como 4.5 no queden sin clasificar.
@@ -567,7 +565,7 @@ def preparar_tvu_lotes(df_tvu_raw: pd.DataFrame) -> pd.DataFrame:
     df["costo_unitario"] = pd.to_numeric(df["costo_unitario"], errors="coerce").fillna(0)
 
     df["valor_en_riesgo"] = df["stock"] * df["costo_unitario"]
-    df["riesgo_tvu"] = df["tvu"].apply(clasificas_riesgo_tvu)
+    df["riesgo_tvu"] = df["tvu"].apply(clasificar_riesgo_tvu)
 
     orden = {
         "🔴 Alto": 1,
@@ -784,114 +782,6 @@ def formatear_tvu_lotes(df_tvu: pd.DataFrame) -> pd.DataFrame:
         ]
     ]
 
-# =========================================================
-# FUNCIÓN AUXILIAR - GENERAR EXCEL CONSOLIDADO DE KPIS (ANUALIZADO 2025 CON FILTRADO SEGURO)
-# =========================================================
-def generar_excel_consolidado_kpis(df_forecast_completo: pd.DataFrame, df_parametros: pd.DataFrame, ss_max: int) -> bytes:
-    """
-    Recorre todos los SKUs, calcula sus indicadores campeones y genera un
-    archivo Excel en memoria con los costos e indicadores estrictamente anualizados para el año 2025.
-    Evita caídas por valores NaN utilizando un tipado y sanitizado defensivo.
-    """
-    productos = sorted(df_forecast_completo["product_id"].unique())
-    registros = []
-
-    for prod in productos:
-        params = obtener_parametros_producto(df_parametros, prod)
-        sub_fore = df_forecast_completo[df_forecast_completo["product_id"] == prod].copy()
-        
-        # Evaluar la política campeona global para este SKU
-        campeon = evaluar_campeon_politicas(sub_fore, params, ss_max)
-        
-        # 1. Re-simular localmente con los parámetros óptimos para extraer la trayectoria temporal de 2025
-        p_optimo = ParametrosInventario(
-            initial_stock=params.initial_stock,
-            lead_time_months=params.lead_time_months,
-            review_period_months=int(campeon.get("r_optimo", params.review_period_months)),
-            ss_months=int(campeon.get("ss_months", params.ss_months)),
-            q_fixed=int(campeon.get("q_optimo", params.q_fixed)),
-            lot_size=params.lot_size,
-            cost_order=params.cost_order,
-            cost_holding_month=params.cost_holding_month,
-            cost_stockout=params.cost_stockout,
-        )
-        
-        df_sim_completo = simular_producto(sub_fore, campeon["politica_ganadora"], p_optimo)
-        
-        # 2. Filtrar el conjunto temporal estrictamente para el año de interés (2025)
-        df_sim_2025 = df_sim_completo[pd.to_datetime(df_sim_completo["date"]).dt.year == 2025].copy()
-        
-        # 3. Recalcular KPIs específicos solo con los datos de 2025
-        if not df_sim_2025.empty:
-            demanda_total_2025 = df_sim_2025["demand_real"].sum()
-            ventas_perdidas_2025 = df_sim_2025["sales_lost"].sum()
-            ordenes_2025 = (df_sim_2025["order_placed"] > 0).sum()
-            
-            fill_rate_2025 = 1 - (ventas_perdidas_2025 / demanda_total_2025) if demanda_total_2025 > 0 else 1.0
-            costo_ordenar_2025 = ordenes_2025 * params.cost_order
-            costo_mantener_2025 = df_sim_2025["inventory_level"].sum() * params.cost_holding_month
-            costo_quiebre_2025 = ventas_perdidas_2025 * params.cost_stockout
-            costo_total_2025 = costo_ordenar_2025 + costo_mantener_2025 + costo_quiebre_2025
-        else:
-            # Fallback en caso de que no existan registros para 2025
-            fill_rate_2025 = 1.0
-            ventas_perdidas_2025 = 0.0
-            costo_ordenar_2025 = 0.0
-            costo_mantener_2025 = 0.0
-            costo_quiebre_2025 = 0.0
-            costo_total_2025 = 0.0
-        
-        # Extraer métricas de pronóstico con validaciones de existencia y tipo
-        metodo_usado = sub_fore["method_used"].iloc[0] if "method_used" in sub_fore.columns and not sub_fore["method_used"].empty else "Sin datos"
-        wmape = sub_fore["method_wmape"].iloc[0] if "method_wmape" in sub_fore.columns else 0.0
-        bias = sub_fore["method_bias"].iloc[0] if "method_bias" in sub_fore.columns else 0.0
-        
-        # Limpiar wmape y bias de valores NaN
-        wmape_clean = float(wmape) if pd.notnull(wmape) and np.isfinite(wmape) else 0.0
-        bias_clean = float(bias) if pd.notnull(bias) and np.isfinite(bias) else 0.0
-        
-        # Convertir SS a unidades físicas reales
-        demanda_prom_sku = max(1.0, sub_fore["demand_forecast"].mean())
-        ss_meses = campeon.get("ss_months", 0)
-        ss_meses_clean = float(ss_meses) if pd.notnull(ss_meses) and np.isfinite(ss_meses) else 0.0
-        
-        ss_unidades = float(ss_meses_clean) if ss_meses_clean > 36 else (demanda_prom_sku * ss_meses_clean)
-        
-        # Asegurar enteros válidos
-        ss_unidades_clean = int(round(ss_unidades)) if pd.notnull(ss_unidades) and np.isfinite(ss_unidades) else 0
-        ss_meses_final = int(ss_meses_clean)
-        
-        # Sanitizar KPIs anualizados de 2025
-        fill_rate_clean = float(fill_rate_2025) if pd.notnull(fill_rate_2025) and np.isfinite(fill_rate_2025) else 1.0
-        lost_sales_clean = float(ventas_perdidas_2025) if pd.notnull(ventas_perdidas_2025) and np.isfinite(ventas_perdidas_2025) else 0.0
-        c_order_clean = float(costo_ordenar_2025) if pd.notnull(costo_ordenar_2025) and np.isfinite(costo_ordenar_2025) else 0.0
-        c_hold_clean = float(costo_mantener_2025) if pd.notnull(costo_mantener_2025) and np.isfinite(costo_mantener_2025) else 0.0
-        c_stockout_clean = float(costo_quiebre_2025) if pd.notnull(costo_quiebre_2025) and np.isfinite(costo_quiebre_2025) else 0.0
-        c_total_clean = float(costo_total_2025) if pd.notnull(costo_total_2025) and np.isfinite(costo_total_2025) else 0.0
-
-        registros.append({
-            "SKU": prod,
-            "Mejor Método Pronóstico": metodo_usado,
-            "wMAPE (Error)": wmape_clean,
-            "Bias (Sesgo)": bias_clean,
-            "Política Recomendada": campeon.get("politica_ganadora", "RS - revisión periódica"),
-            "SS Recomendado (Meses)": ss_meses_final,
-            "SS Recomendado (Unidades)": ss_unidades_clean,
-            "Fill Rate Proyectado (2025)": fill_rate_clean,
-            "Ventas Perdidas (Unidades - 2025)": lost_sales_clean,
-            "Costo Ordenar (S/ - 2025)": c_order_clean,
-            "Costo Almacenar (S/ - 2025)": c_hold_clean,
-            "Costo Quiebre (S/ - 2025)": c_stockout_clean,
-            "Costo Total Operativo (S/ - 2025)": c_total_clean
-        })
-        
-    df_consolidado = pd.DataFrame(registros)
-    
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_consolidado.to_excel(writer, index=False, sheet_name="KPIs 2025 Consolidado")
-        
-    return output.getvalue()
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -998,26 +888,6 @@ else:
 
         if "Datos" in xls.sheet_names:
             df_parametros = pd.read_excel(xls, sheet_name="Datos")
-            
-            # 🛡️ SANITIZACIÓN DEFENSIVA GLOBAL DE LA HOJA DATOS CONTRA CELDAS EN BLANCO (NaN)
-            if df_parametros is not None and not df_parametros.empty:
-                df_parametros = df_parametros.copy()
-                for col in df_parametros.columns:
-                    col_norm = str(col).strip().lower()
-                    if "stock" in col_norm or "stoc" in col_norm:
-                        df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(0)
-                    elif "lead" in col_norm:
-                        df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(1)
-                    elif "period" in col_norm:
-                        df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(1)
-                    elif "ss" in col_norm:
-                        df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(1)
-                    elif "q_fixed" in col_norm:
-                        df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(0)
-                    elif "lot_size" in col_norm:
-                        df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(1)
-                    elif "cost" in col_norm or "holding" in col_norm or "stockout" in col_norm or "order" in col_norm or "value" in col_norm or "costo" in col_norm or "unit" in col_norm:
-                        df_parametros[col] = pd.to_numeric(df_parametros[col], errors="coerce").fillna(0.0)
         else:
             st.error(
                 "⚠️ El archivo Excel no tiene una pestaña llamada 'Datos'. "
@@ -1042,72 +912,6 @@ resumen_productos_tvu = resumen_tvu_por_producto(df_tvu)
 valor_tvu_riesgo = kpis_tvu["valor_riesgo"]
 total_lotes_tvu = len(df_tvu)
 total_skus_tvu = df_tvu["producto"].nunique() if not df_tvu.empty else 0
-
-# =========================================================
-# PRONÓSTICO MENSUAL (SE SACA DE LOS MÓDULOS)
-# =========================================================
-st.sidebar.header("2. Pronóstico mensual")
-
-modo_pronostico = st.sidebar.selectbox(
-    "Selección del método",
-    ["Automático: mejor método por producto", "Manual: elegir un método"],
-)
-
-ultima_fecha_historica = pd.to_datetime(df_real["date"].max()).to_period("M").to_timestamp()
-
-# Calculamos 8 meses futuros automáticamente
-fecha_8_meses = ultima_fecha_historica + pd.DateOffset(months=8)
-
-fecha_fin_pronostico = st.sidebar.date_input(
-    "Pronosticar hasta",
-    value=fecha_8_meses,
-    min_value=ultima_fecha_historica.date(),
-    key="fecha_fin_pronostico_global"
-)
-
-fecha_fin_pronostico = pd.to_datetime(fecha_fin_pronostico).to_period("M").to_timestamp()
-
-# Cálculo del forecast auto
-df_forecast_auto, df_comparacion = generar_forecast_mejor_por_producto(
-    df_real,
-    fecha_fin_pronostico=fecha_fin_pronostico,
-)
-
-# =========================================================
-# RESUMEN FORECAST PARA VISTA GENERAL
-# =========================================================
-total_skus_forecast = df_real["product_id"].nunique()
-
-df_ahorro_forecast, kpis_forecast = calcular_ahorro_forecast_2025(
-    df_forecast_auto=df_forecast_auto,
-    df_forecast_empresa=df_forecast_empresa,
-    df_parametros=df_parametros,
-)
-
-ahorro_total = kpis_forecast["ahorro_total"]
-skus_comparados_forecast = kpis_forecast["skus_comparados"]
-
-resumen_mejores_exec = df_comparacion[df_comparacion["Es mejor"]].copy()
-modelo_mas_usado = (
-    resumen_mejores_exec["Método"].mode().iloc[0]
-    if not resumen_mejores_exec.empty
-    else "Sin datos"
-)
-
-# =========================================================
-# POLÍTICA DE INVENTARIO Y SS_MAX GLOBAL
-# =========================================================
-st.sidebar.header("3. Política de Inventario")
-
-politica = st.sidebar.selectbox(
-    "Política (Modo Simulación)",
-    [
-        "RS - revisión periódica",
-        "sS - punto de reorden y nivel máximo",
-    ],
-)
-
-ss_max = st.sidebar.slider("Máximo SS para optimizar (meses)", 1, 24, 6)
 
 # =========================================================
 # MÓDULO TVU INDEPENDIENTE
@@ -1196,6 +1000,60 @@ if modulo == "⚠️ TVU - Productos próximos a vencer":
     st.stop()
 
 # =========================================================
+# PRONÓSTICO MENSUAL
+# =========================================================
+st.sidebar.header("2. Pronóstico mensual")
+
+modo_pronostico = st.sidebar.selectbox(
+    "Selección del método",
+    ["Automático: mejor método por producto", "Manual: elegir un método"],
+)
+
+ultima_fecha_historica = pd.to_datetime(df_real["date"].max()).to_period("M").to_timestamp()
+
+# Calculamos 8 meses futuros automáticamente
+fecha_8_meses = ultima_fecha_historica + pd.DateOffset(months=8)
+
+fecha_fin_pronostico = st.sidebar.date_input(
+    "Pronosticar hasta",
+    value=fecha_8_meses,
+    min_value=ultima_fecha_historica.date(),
+)
+
+fecha_fin_pronostico = pd.to_datetime(fecha_fin_pronostico).to_period("M").to_timestamp()
+
+# 🔴 ESTA ES LA LÍNEA QUE SE HABÍA BORRADO Y QUE CALCULA TODO:
+df_forecast_auto, df_comparacion = generar_forecast_mejor_por_producto(
+    df_real,
+    fecha_fin_pronostico=fecha_fin_pronostico,
+)
+
+# =========================================================
+# RESUMEN FORECAST PARA VISTA GENERAL
+# =========================================================
+
+# =========================================================
+# RESUMEN FORECAST PARA VISTA GENERAL
+# =========================================================
+total_skus_forecast = df_real["product_id"].nunique()
+
+df_ahorro_forecast, kpis_forecast = calcular_ahorro_forecast_2025(
+    df_forecast_auto=df_forecast_auto,
+    df_forecast_empresa=df_forecast_empresa,
+    df_parametros=df_parametros,
+)
+
+ahorro_total = kpis_forecast["ahorro_total"]
+skus_comparados_forecast = kpis_forecast["skus_comparados"]
+
+resumen_mejores_exec = df_comparacion[df_comparacion["Es mejor"]].copy()
+modelo_mas_usado = (
+    resumen_mejores_exec["Método"].mode().iloc[0]
+    if not resumen_mejores_exec.empty
+    else "Sin datos"
+)
+
+# =========================================================
 # MÓDULO VISTA GENERAL EJECUTIVA
 # =========================================================
 if modulo == "📊 Vista General Ejecutiva":
@@ -1212,31 +1070,6 @@ if modulo == "📊 Vista General Ejecutiva":
     c3.metric("Valor en Riesgo TVU", f"S/ {valor_tvu_riesgo:,.0f}")
     c4.metric("Impacto Económico Identificado", f"S/ {impacto_identificado:,.0f}")
     c5.metric("Modelo más utilizado", modelo_mas_usado)
-
-    st.divider()
-
-    # Botón de descarga consolidado
-    st.markdown("### 📥 Reporte de Decisiones del Portafolio")
-    st.write("Genera y descarga un consolidado en formato Excel con las políticas logísticas, inventarios óptimos y costos para todos los SKUs.")
-
-    with st.spinner("Procesando optimización y compilando reporte para todos los SKUs..."):
-        try:
-            excel_binario = generar_excel_consolidado_kpis(
-                df_forecast_completo=df_forecast_auto,
-                df_parametros=df_parametros,
-                ss_max=ss_max
-            )
-            
-            st.download_button(
-                label="📊 Descargar Consolidado de KPIs por SKU (Excel)",
-                data=excel_binario,
-                file_name="reporte_consolidado_inventarios_2025.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="btn_descarga_excel_exec"
-            )
-        except Exception as e:
-            st.error(f"No se pudo generar el reporte consolidado: {str(e)}")
 
     st.divider()
 
@@ -1316,6 +1149,21 @@ if modo_pronostico == "Automático: mejor método por producto":
     st.sidebar.success(f"Método elegido para {producto_sel}: {mejor_metodo_producto}")
 else:
     st.sidebar.info(f"Mejor método para {producto_sel}: {mejor_metodo_producto}")
+
+# =========================================================
+# POLÍTICA DE INVENTARIO
+# =========================================================
+st.sidebar.header("3. Política de Inventario")
+
+politica = st.sidebar.selectbox(
+    "Política (Modo Simulación)",
+    [
+        "RS - revisión periódica",
+        "sS - punto de reorden y nivel máximo",
+    ],
+)
+
+ss_max = st.sidebar.slider("Máximo SS para optimizar (meses)", 1, 24, 6)
 
 parametros_del_producto = obtener_parametros_producto(df_parametros, producto_sel)
 
@@ -1508,7 +1356,6 @@ with tab1:
         data=resumen_mejores.to_csv(index=False).encode("utf-8"),
         file_name="mejor_metodo_por_producto.csv",
         mime="text/csv",
-        key="btn_descarga_csv_mejores"
     )
 
 # =========================================================
@@ -1798,33 +1645,7 @@ with tab5:
         use_container_width=True,
         hide_index=True
     )
-
-    # =========================================================
-    # BOTÓN DE DESCARGA CONSOLIDADO TAMBIÉN EN MÓDULO DE INVENTARIOS
-    # =========================================================
-    st.divider()
-    st.markdown("### 📥 Reporte de Decisiones del Portafolio")
-    st.write("Genera y descarga un consolidado en formato Excel con las políticas logísticas, inventarios óptimos y costos para todos los SKUs.")
-
-    with st.spinner("Procesando optimización y compilando reporte para todos los SKUs..."):
-        try:
-            excel_binario_inv = generar_excel_consolidado_kpis(
-                df_forecast_completo=df_forecast_auto,
-                df_parametros=df_parametros,
-                ss_max=ss_max
-            )
-            
-            st.download_button(
-                label="📊 Descargar Consolidado de KPIs por SKU (Excel)",
-                data=excel_binario_inv,
-                file_name="reporte_consolidado_inventarios.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="btn_descarga_excel_inv"
-            )
-        except Exception as e:
-            st.error(f"No se pudo generar el reporte consolidado: {str(e)}")
-
+    
 # =========================================================
 # TAB 6: TABLAS Y REPORTES
 # =========================================================
@@ -1946,7 +1767,6 @@ with tab6:
             file_name=f"pronostico_{producto_sel}.csv",
             mime="text/csv",
             use_container_width=True,
-            key="btn_descarga_csv_fore"
         )
     with col_d2:
         st.download_button(
@@ -1955,7 +1775,6 @@ with tab6:
             file_name=f"simulacion_{producto_sel}.csv",
             mime="text/csv",
             use_container_width=True,
-            key="btn_descarga_csv_sim"
         )
     with col_d3:
         st.download_button(
@@ -1964,5 +1783,4 @@ with tab6:
             file_name="comparacion_metodos_portafolio.csv",
             mime="text/csv",
             use_container_width=True,
-            key="btn_descarga_csv_comp"
         )
